@@ -1,0 +1,542 @@
+name: Claude Code Review (Shared)
+
+on:
+  workflow_call:
+    inputs:
+      review_model:
+        description: 'Anthropic model for push reviews'
+        required: false
+        type: string
+        default: 'claude-sonnet-4-20250514'
+      email_to:
+        description: 'Email recipient for push review digest'
+        required: false
+        type: string
+        default: 'shiftedmediagroup@gmail.com'
+      email_from:
+        description: 'Email sender for push review digest'
+        required: false
+        type: string
+        default: 'Code Review <codereview@shiftedmediagroup.com>'
+      diff_limit:
+        description: 'Max chars for diff truncation'
+        required: false
+        type: number
+        default: 100000
+      file_content_limit:
+        description: 'Max chars for full file content'
+        required: false
+        type: number
+        default: 80000
+      confidence_threshold:
+        description: 'Minimum confidence (0-1) to include a finding in the main report'
+        required: false
+        type: number
+        default: 0.7
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      RESEND_API_KEY:
+        required: false
+
+jobs:
+  # ============================================
+  # PR Review — uses claude-code-action (full agent)
+  # Posts inline comments directly on the PR
+  # ============================================
+  pr-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check for review context
+        id: context
+        run: |
+          if [ -f ".github/review-context.md" ]; then
+            echo "has_context=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_context=false" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            ${{ steps.context.outputs.has_context == 'true' && format('## PROJECT CONTEXT\nRead the file .github/review-context.md first — it contains project-specific patterns, auth model, DB constraints, and known-safe designs you MUST understand before reviewing.\n\n') || '' }}
+
+            ## REVIEW METHODOLOGY
+
+            You are a code reviewer. Follow this exact process for every finding:
+
+            ### Step 1: Understand the change
+            Read the PR diff and understand what the author intended.
+
+            ### Step 2: Read full file context
+            For each changed file, read the FULL file (not just the diff hunk) to see surrounding code, imports, and error handling.
+
+            ### Step 3: Verify before reporting
+            Before flagging ANY issue, check whether:
+            - Existing code in the SAME FILE already mitigates it (error handlers, constraints, guards)
+            - A database constraint handles it (unique indexes, foreign keys, check constraints)
+            - The framework provides the protection (Next.js auto-escapes JSX, Supabase RLS, etc.)
+            - A shared utility handles it (check imports)
+
+            ### Step 4: Trace the failure path
+            For each potential issue, trace what ACTUALLY happens when it goes wrong:
+            - What error gets thrown? Is it caught?
+            - Does the function return early? Does the caller handle the error?
+            - Is there a try/catch? A database constraint? A type guard?
+
+            ### Step 5: Report only verified issues
+            Only flag issues where you can explain ALL THREE:
+            1. The EXACT file and line where the gap exists
+            2. HOW to trigger the problem (specific input, timing, or sequence)
+            3. WHY existing code does NOT prevent it
+
+            If you cannot fill in all three, do NOT report the finding.
+
+            ## SEVERITY DEFINITIONS
+            - **CRITICAL** = Exploitable security vulnerability or data exposure. Describe the exact exploit path.
+            - **HIGH** = Bug that WILL cause incorrect behavior in production. Describe the trigger scenario.
+            - **MEDIUM** = Missing error handling that could crash in an edge case, or race condition with real user impact.
+            - **LOW** = Code quality improvement, minor optimization, defensive coding suggestion.
+
+            ## KNOWN SAFE PATTERNS — DO NOT FLAG THESE
+            - DB `unique` constraints catching duplicates (error 23505) = intentional race condition handling
+            - UUID v4 tokens (122-bit entropy) = computationally infeasible to brute force
+            - `crypto.timingSafeEqual()` = prevents timing attacks on secret comparison
+            - Next.js JSX auto-escapes output = no XSS risk unless `dangerouslySetInnerHTML` is used
+            - `SUPABASE_SERVICE_ROLE_KEY` in Route Handlers / Server Components = server-side only, not exposed
+            - Null coalescing (`?? ""`) and optional chaining (`?.`) = intentional null safety
+            - Catching errors and returning success for idempotency = intentional, not hidden failures
+            - Strict equality (`=== true` / `=== false`) filtering non-boolean values = safe type guard
+
+            ## OUTPUT FORMAT
+            - Use inline comments for specific code issues (cite the exact line)
+            - Post a summary comment with: overall severity, count of findings by tier, and what you verified was safe
+            - Include a "Verified safe" section listing patterns you checked and confirmed are not issues
+            - If the code looks good, say "All clear" and briefly note what you verified
+            - Do NOT flag: style, naming, comments, import order, or TypeScript strictness unless they cause bugs
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read"
+
+  # ============================================
+  # Push Review — calls Anthropic API directly
+  # Sends structured email digest via Resend
+  # ============================================
+  push-review:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate diff and full file content
+        id: diff
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          # ── Multi-commit push support ──────────────────────────────
+          # Use the full push range instead of just HEAD~1
+          # Falls back to HEAD~1 for initial commits (before = 0000...)
+          if echo "$BEFORE_SHA" | grep -q "^0\{40\}$"; then
+            DIFF_RANGE="HEAD~1..HEAD"
+          else
+            DIFF_RANGE="${BEFORE_SHA}..${AFTER_SHA}"
+          fi
+          echo "diff_range=$DIFF_RANGE" >> $GITHUB_OUTPUT
+
+          git diff $DIFF_RANGE > /tmp/commit-diff-full.txt
+          head -c ${{ inputs.diff_limit }} /tmp/commit-diff-full.txt > /tmp/commit-diff.txt
+
+          # File list
+          FILES=$(git diff $DIFF_RANGE --name-only)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # ── Full file content for changed files ────────────────────
+          echo "" > /tmp/file-contents.txt
+          TOTAL_SIZE=0
+          LIMIT=${{ inputs.file_content_limit }}
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            [ ! -f "$file" ] && continue
+
+            # Skip binary, lockfiles, generated files
+            case "$file" in
+              *.lock|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.svg|package-lock.json|yarn.lock|pnpm-lock.yaml|*.map)
+                continue
+                ;;
+            esac
+
+            FILE_SIZE=$(wc -c < "$file" 2>/dev/null || echo 0)
+            NEW_TOTAL=$((TOTAL_SIZE + FILE_SIZE))
+
+            if [ "$NEW_TOTAL" -gt "$LIMIT" ]; then
+              echo "--- TRUNCATED: Remaining files omitted (would exceed ${LIMIT} char limit) ---" >> /tmp/file-contents.txt
+              break
+            fi
+
+            echo "===== FILE: $file =====" >> /tmp/file-contents.txt
+            cat -n "$file" >> /tmp/file-contents.txt
+            echo "" >> /tmp/file-contents.txt
+            TOTAL_SIZE=$NEW_TOTAL
+          done <<< "$FILES"
+
+          # ── Per-repo context ───────────────────────────────────────
+          if [ -f ".github/review-context.md" ]; then
+            cp .github/review-context.md /tmp/review-context.txt
+            echo "has_context=true" >> $GITHUB_OUTPUT
+          else
+            echo "" > /tmp/review-context.txt
+            echo "has_context=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Review with Claude API
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+          HAS_CONTEXT: ${{ steps.diff.outputs.has_context }}
+          DIFF_RANGE: ${{ steps.diff.outputs.diff_range }}
+        run: |
+          # ── Build the review prompt ────────────────────────────────
+          cat > /tmp/review-prompt.txt <<'PROMPT_END'
+          ## REVIEW METHODOLOGY
+
+          You are reviewing a commit pushed to the main branch. You have up to three sources:
+          1. The DIFF showing what changed
+          2. The FULL CONTENT of each changed file (with line numbers, so you can see surrounding code)
+          3. Project-specific context (if provided) explaining auth patterns, DB design, and safe patterns
+
+          ### Your process — follow in order:
+          1. Read the project context (if provided) to understand codebase patterns and known-safe designs
+          2. Read the diff to understand what changed and why
+          3. Read the full file content to verify whether existing code already handles each concern
+          4. For each potential issue, trace the actual failure path — what happens when it goes wrong?
+          5. Before reporting: try to DISPROVE the finding. Check for DB constraints, error handlers, type guards, framework protections
+          6. Only report issues where you can fill in ALL fields of the schema below
+
+          ### Severity definitions:
+          - CRITICAL = Exploitable security vulnerability or data exposure. You MUST describe the exploit path.
+          - HIGH = Bug that WILL cause incorrect behavior in production. You MUST describe the trigger.
+          - MEDIUM = Missing error handling that could crash, or edge case with real user impact.
+          - LOW = Code quality improvement, minor optimization, defensive coding suggestion.
+          - NONE = No issues found. Everything verified safe.
+
+          ### Known safe patterns — do NOT flag:
+          - DB unique constraints catching duplicates (error 23505) = intentional race condition handling
+          - UUID v4 tokens (122-bit entropy) = computationally infeasible to brute force
+          - crypto.timingSafeEqual() = prevents timing attacks
+          - Next.js JSX auto-escapes output = no XSS unless dangerouslySetInnerHTML
+          - SUPABASE_SERVICE_ROLE_KEY in Route Handlers = server-side, not exposed to client
+          - Null coalescing (??) and optional chaining (?.) = intentional null safety
+          - Catching errors and returning success for idempotency = intentional
+          - Strict equality (=== true / === false) filtering non-booleans = safe type guard
+          - .maybeSingle() instead of .single() = intentional "not found is OK" pattern
+
+          ### Rules:
+          - Every finding MUST have: file, line, exploit_path, why_not_mitigated
+          - If you cannot explain HOW to trigger the issue, do NOT include it
+          - Do NOT flag: style, naming, comments, import order, TypeScript strictness
+          - DO include a verified_safe array showing what you checked and confirmed is fine
+
+          ### Response format — respond as JSON only (no markdown wrapping):
+          {
+            "summary": "one-line summary of the review",
+            "severity": "none|low|medium|high|critical",
+            "issues": [
+              {
+                "severity": "critical|high|medium|low",
+                "confidence": 0.0-1.0,
+                "file": "path/to/file.ts",
+                "line": 42,
+                "title": "Short description of the issue",
+                "exploit_path": "How to trigger this issue — specific input, timing, or sequence",
+                "why_not_mitigated": "Why existing code does NOT handle this",
+                "fix": "Recommended fix"
+              }
+            ],
+            "verified_safe": [
+              "Description of pattern checked and confirmed safe (e.g., 'Token validated against DB on lines 50-54')"
+            ]
+          }
+
+          If no issues found, set severity to "none", issues to [], and fill verified_safe with what you checked.
+          PROMPT_END
+
+          # ── Build API payload ──────────────────────────────────────
+          if [ "$HAS_CONTEXT" = "true" ]; then
+            jq -n \
+              --arg msg "$COMMIT_MSG" \
+              --arg files "$CHANGED_FILES" \
+              --arg range "$DIFF_RANGE" \
+              --rawfile diff /tmp/commit-diff.txt \
+              --rawfile file_contents /tmp/file-contents.txt \
+              --rawfile context /tmp/review-context.txt \
+              --rawfile prompt /tmp/review-prompt.txt \
+              --arg model "${{ inputs.review_model }}" \
+              '{
+                model: $model,
+                max_tokens: 4096,
+                messages: [{
+                  role: "user",
+                  content: ("## PROJECT CONTEXT\n" + $context + "\n\n## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
+                }]
+              }' > /tmp/api-payload.json
+          else
+            jq -n \
+              --arg msg "$COMMIT_MSG" \
+              --arg files "$CHANGED_FILES" \
+              --arg range "$DIFF_RANGE" \
+              --rawfile diff /tmp/commit-diff.txt \
+              --rawfile file_contents /tmp/file-contents.txt \
+              --rawfile prompt /tmp/review-prompt.txt \
+              --arg model "${{ inputs.review_model }}" \
+              '{
+                model: $model,
+                max_tokens: 4096,
+                messages: [{
+                  role: "user",
+                  content: ("## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
+                }]
+              }' > /tmp/api-payload.json
+          fi
+
+          # ── Call Anthropic API with retry ──────────────────────────
+          MAX_RETRIES=3
+          ATTEMPT=0
+          RESPONSE=""
+
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "::group::API attempt $ATTEMPT of $MAX_RETRIES"
+
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/api-response.json \
+              https://api.anthropic.com/v1/messages \
+              -H "content-type: application/json" \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -d @/tmp/api-payload.json)
+
+            echo "HTTP status: $HTTP_CODE"
+            echo "::endgroup::"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              RESPONSE=$(cat /tmp/api-response.json)
+              break
+            fi
+
+            echo "::warning::API attempt $ATTEMPT failed (HTTP $HTTP_CODE)"
+            echo "::group::Error response"
+            cat /tmp/api-response.json 2>/dev/null || echo "No response body"
+            echo "::endgroup::"
+
+            # Don't retry auth errors
+            if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+              echo "::error::Authentication failed. Check ANTHROPIC_API_KEY secret."
+              break
+            fi
+
+            if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+              SLEEP_TIME=$((ATTEMPT * 5 + ATTEMPT * ATTEMPT))
+              echo "Retrying in ${SLEEP_TIME}s..."
+              sleep $SLEEP_TIME
+            fi
+          done
+
+          # ── Extract review text ────────────────────────────────────
+          if [ -n "$RESPONSE" ]; then
+            REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+          fi
+
+          if [ -z "$REVIEW" ]; then
+            echo "::warning::Review extraction failed."
+            cat /tmp/api-response.json 2>/dev/null || echo "No response captured"
+            REVIEW='{"summary":"Review unavailable - API error","severity":"none","issues":[],"verified_safe":[]}'
+          fi
+
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$REVIEW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send email digest
+        uses: actions/github-script@v7
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          REVIEW_OUTPUT: ${{ steps.review.outputs.review }}
+          EMAIL_TO: ${{ inputs.email_to }}
+          EMAIL_FROM: ${{ inputs.email_from }}
+          CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}
+        with:
+          script: |
+            const resendKey = process.env.RESEND_API_KEY;
+            if (!resendKey) {
+              core.info('RESEND_API_KEY not set — skipping email');
+              return;
+            }
+
+            const reviewRaw = process.env.REVIEW_OUTPUT || '{}';
+            const emailTo = process.env.EMAIL_TO;
+            const emailFrom = process.env.EMAIL_FROM;
+            const threshold = parseFloat(process.env.CONFIDENCE_THRESHOLD) || 0.7;
+
+            // ── HTML escape helper ──────────────────────────────────
+            const esc = (s) => String(s)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;');
+
+            // ── Parse review JSON ───────────────────────────────────
+            let review;
+            try {
+              const cleaned = reviewRaw
+                .replace(/```json\n?/g, '')
+                .replace(/```\n?/g, '')
+                .trim();
+              review = JSON.parse(cleaned);
+            } catch {
+              review = {
+                summary: 'Review complete (parse error — raw output below)',
+                severity: 'none',
+                issues: [],
+                verified_safe: [],
+                _raw: reviewRaw,
+              };
+            }
+
+            const summary = review.summary || 'Review complete';
+            const severity = review.severity || 'none';
+            const allIssues = Array.isArray(review.issues) ? review.issues : [];
+            const verifiedSafe = Array.isArray(review.verified_safe) ? review.verified_safe : [];
+
+            // ── Confidence-based filtering ──────────────────────────
+            const actionable = allIssues.filter(i => (i.confidence || 0) >= threshold);
+            const belowThreshold = allIssues.filter(i => (i.confidence || 0) < threshold);
+            const issuesFound = actionable.length > 0;
+
+            // ── Build email content ─────────────────────────────────
+            const fullCommitMsg = context.payload.head_commit?.message || 'No message';
+            const commitMsg = esc(fullCommitMsg.split('\n')[0]);
+            const commitUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`;
+            const shortSha = context.sha.substring(0, 7);
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+
+            const severityColors = {
+              none: '#22c55e', low: '#3b82f6', medium: '#eab308',
+              high: '#f97316', critical: '#ef4444'
+            };
+            const badgeColor = severityColors[severity] || '#6b7280';
+
+            // ── Issues HTML ─────────────────────────────────────────
+            let issuesHtml = '';
+
+            if (actionable.length > 0) {
+              const tierColors = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#3b82f6' };
+              issuesHtml += '<h3 style="margin: 16px 0 8px;">Issues Found</h3>';
+              for (const issue of actionable) {
+                const c = tierColors[issue.severity] || '#6b7280';
+                issuesHtml += `
+                  <div style="border-left: 4px solid ${c}; padding: 12px 16px; margin: 8px 0; background: #f8fafc; border-radius: 0 6px 6px 0;">
+                    <div style="display: inline-block; background: ${c}; color: white; padding: 2px 8px; border-radius: 8px; font-size: 12px; margin-bottom: 6px;">
+                      ${esc(issue.severity?.toUpperCase() || 'UNKNOWN')} &middot; ${Math.round((issue.confidence || 0) * 100)}% confidence
+                    </div>
+                    <p style="margin: 4px 0; font-weight: 600;">${esc(issue.title || 'Untitled')}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>File:</strong> ${esc(issue.file || '?')}:${issue.line || '?'}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>Exploit path:</strong> ${esc(issue.exploit_path || 'Not specified')}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>Why not mitigated:</strong> ${esc(issue.why_not_mitigated || 'Not specified')}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>Fix:</strong> ${esc(issue.fix || 'Not specified')}</p>
+                  </div>`;
+              }
+            }
+
+            // ── Below-threshold findings (collapsed) ────────────────
+            if (belowThreshold.length > 0) {
+              issuesHtml += `<h3 style="margin: 16px 0 8px; color: #94a3b8;">Investigated but not actionable (below ${Math.round(threshold * 100)}% confidence)</h3>`;
+              for (const issue of belowThreshold) {
+                issuesHtml += `
+                  <div style="padding: 8px 16px; margin: 4px 0; background: #f1f5f9; border-radius: 6px; font-size: 13px; color: #64748b;">
+                    <strong>${esc(issue.title || 'Untitled')}</strong> (${Math.round((issue.confidence || 0) * 100)}%) — ${esc(issue.file || '?')}:${issue.line || '?'}
+                  </div>`;
+              }
+            }
+
+            // ── Verified safe section ───────────────────────────────
+            let safeHtml = '';
+            if (verifiedSafe.length > 0) {
+              safeHtml = '<h3 style="margin: 16px 0 8px; color: #22c55e;">Verified Safe</h3><ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #475569;">';
+              for (const item of verifiedSafe) {
+                safeHtml += `<li style="margin: 4px 0;">${esc(item)}</li>`;
+              }
+              safeHtml += '</ul>';
+            }
+
+            // ── Raw fallback (if parse failed) ──────────────────────
+            let rawHtml = '';
+            if (review._raw) {
+              rawHtml = `
+                <h3 style="margin: 16px 0 8px; color: #94a3b8;">Raw Output (JSON parse failed)</h3>
+                <pre style="background: #f1f5f9; padding: 12px; border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap;">${esc(review._raw)}</pre>`;
+            }
+
+            // ── Assemble email ──────────────────────────────────────
+            const html = `
+              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 640px; margin: 0 auto;">
+                <div style="background: #0f172a; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+                  <h2 style="margin: 0;">Code Review: ${esc(repo)}</h2>
+                  <p style="margin: 8px 0 0; opacity: 0.8;">Commit <a href="${commitUrl}" style="color: #60a5fa;">${shortSha}</a></p>
+                </div>
+                <div style="border: 1px solid #e2e8f0; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
+                  <p style="margin: 0 0 12px;"><strong>Message:</strong> ${commitMsg}</p>
+                  <div style="display: inline-block; background: ${badgeColor}; color: white; padding: 4px 12px; border-radius: 12px; font-size: 14px; margin-bottom: 16px;">
+                    ${esc(severity.toUpperCase())} ${issuesFound ? `- ${actionable.length} Issue${actionable.length > 1 ? 's' : ''} Found` : '- All Clear'}
+                  </div>
+                  <p style="margin: 0 0 8px;"><strong>Summary:</strong> ${esc(summary)}</p>
+                  ${issuesHtml}
+                  ${safeHtml}
+                  ${rawHtml}
+                  <p style="margin: 16px 0 0; font-size: 13px; color: #64748b;">
+                    <a href="${commitUrl}" style="color: #3b82f6;">View commit on GitHub</a>
+                  </p>
+                </div>
+              </div>`;
+
+            // ── Send via Resend ──────────────────────────────────────
+            const response = await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${resendKey}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                from: emailFrom,
+                to: [emailTo],
+                subject: `[${severity.toUpperCase()}] Code Review: ${fullCommitMsg.split('\n')[0].substring(0, 60)}`,
+                html: html
+              })
+            });
+
+            if (!response.ok) {
+              const err = await response.text();
+              core.warning(`Email send failed: ${err}`);
+            } else {
+              core.info('Review email sent successfully');
+            }
