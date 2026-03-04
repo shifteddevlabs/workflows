@@ -7,7 +7,7 @@ on:
         description: 'Anthropic model for push reviews'
         required: false
         type: string
-        default: 'claude-sonnet-4-6-20260218'
+        default: 'claude-sonnet-4-6'
       email_to:
         description: 'Email recipient for push review digest'
         required: false
