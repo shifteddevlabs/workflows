@@ -122,12 +122,22 @@ jobs:
             - Catching errors and returning success for idempotency = intentional, not hidden failures
             - Strict equality (`=== true` / `=== false`) filtering non-boolean values = safe type guard
 
+            ## CODE QUALITY REVIEW
+            After the bug/security review, do a separate pass for code quality on the CHANGED code only:
+            - **Efficiency**: N+1 queries, unnecessary re-renders, redundant loops, expensive operations in hot paths
+            - **Clarity**: Confusing naming, deeply nested logic (3+ levels), magic numbers/strings, unclear function signatures
+            - **Simplicity**: Over-engineered patterns, premature abstractions, unnecessary indirection, code that could use a built-in
+            - **Dead code**: Unused exports, unreachable branches, commented-out code, unused variables/imports
+
+            Do NOT flag: import order, TypeScript strictness, formatting, semicolons, trailing commas.
+            Each quality observation needs a concrete suggestion, not just "this could be better."
+
             ## OUTPUT FORMAT
             - Use inline comments for specific code issues (cite the exact line)
             - Post a summary comment with: overall severity, count of findings by tier, and what you verified was safe
+            - Include a "Code Quality" section with any efficiency, clarity, simplicity, or dead code observations
             - Include a "Verified safe" section listing patterns you checked and confirmed are not issues
             - If the code looks good, say "All clear" and briefly note what you verified
-            - Do NOT flag: style, naming, comments, import order, or TypeScript strictness unless they cause bugs
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read"
@@ -252,11 +262,23 @@ jobs:
           - Strict equality (=== true / === false) filtering non-booleans = safe type guard
           - .maybeSingle() instead of .single() = intentional "not found is OK" pattern
 
-          ### Rules:
+          ### Bug/Security rules:
           - Every finding MUST have: file, line, exploit_path, why_not_mitigated
           - If you cannot explain HOW to trigger the issue, do NOT include it
-          - Do NOT flag: style, naming, comments, import order, TypeScript strictness
           - DO include a verified_safe array showing what you checked and confirmed is fine
+
+          ### Code quality review
+          After completing the bug/security review, do a SEPARATE pass for code quality:
+          - **Efficiency**: N+1 queries, unnecessary re-renders, redundant loops, expensive operations in hot paths, missing memoization
+          - **Clarity**: Confusing naming, deeply nested logic (3+ levels), magic numbers/strings, unclear function signatures
+          - **Simplicity**: Over-engineered patterns, premature abstractions, unnecessary indirection, code that could use a built-in
+          - **Dead code**: Unused exports, unreachable branches, commented-out code, unused variables/imports
+
+          Quality rules:
+          - Only flag quality items in the CHANGED code (the diff), not pre-existing code
+          - Do NOT flag: import order, TypeScript strictness, formatting, semicolons, trailing commas
+          - Each quality item needs a concrete suggestion, not just "this could be better"
+          - Impact is "low" (nice-to-have) or "medium" (noticeably improves the code)
 
           ### Response format — respond as JSON only (no markdown wrapping):
           {
@@ -274,12 +296,22 @@ jobs:
                 "fix": "Recommended fix"
               }
             ],
+            "quality": [
+              {
+                "category": "efficiency|clarity|simplicity|dead_code",
+                "file": "path/to/file.ts",
+                "line": 42,
+                "title": "Short description",
+                "suggestion": "What to improve and why",
+                "impact": "low|medium"
+              }
+            ],
             "verified_safe": [
               "Description of pattern checked and confirmed safe (e.g., 'Token validated against DB on lines 50-54')"
             ]
           }
 
-          If no issues found, set severity to "none", issues to [], and fill verified_safe with what you checked.
+          If no issues found, set severity to "none", issues to [], quality to [], and fill verified_safe with what you checked.
           PROMPT_END
 
           # ── Build API payload ──────────────────────────────────────
@@ -295,7 +327,7 @@ jobs:
               --arg model "${{ inputs.review_model }}" \
               '{
                 model: $model,
-                max_tokens: 4096,
+                max_tokens: 8192,
                 messages: [{
                   role: "user",
                   content: ("## PROJECT CONTEXT\n" + $context + "\n\n## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
@@ -312,7 +344,7 @@ jobs:
               --arg model "${{ inputs.review_model }}" \
               '{
                 model: $model,
-                max_tokens: 4096,
+                max_tokens: 8192,
                 messages: [{
                   role: "user",
                   content: ("## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
@@ -370,18 +402,113 @@ jobs:
           if [ -z "$REVIEW" ]; then
             echo "::warning::Review extraction failed."
             cat /tmp/api-response.json 2>/dev/null || echo "No response captured"
-            REVIEW='{"summary":"Review unavailable - API error","severity":"none","issues":[],"verified_safe":[]}'
+            REVIEW='{"summary":"Review unavailable - API error","severity":"none","issues":[],"quality":[],"verified_safe":[]}'
           fi
+
+          # Save raw review for validator step
+          echo "$REVIEW" > /tmp/raw-review.json
 
           echo "review<<EOF" >> $GITHUB_OUTPUT
           echo "$REVIEW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Validate findings
+        id: validate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RAW_REVIEW: ${{ steps.review.outputs.review }}
+        run: |
+          # ── Skip validation if no findings ───────────────────────
+          HAS_ISSUES=$(echo "$RAW_REVIEW" | jq -r '
+            if (.issues | length > 0) or (.quality | length > 0) then "true"
+            else "false" end' 2>/dev/null || echo "false")
+
+          if [ "$HAS_ISSUES" = "false" ]; then
+            echo "No findings to validate — skipping"
+            echo "review<<EOF" >> $GITHUB_OUTPUT
+            echo "$RAW_REVIEW" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Findings detected — running validator pass"
+
+          # ── Build validator prompt ───────────────────────────────
+          cat > /tmp/validator-prompt.txt <<'VALIDATOR_END'
+          You are a skeptical code review validator. Your job is to DISPROVE each finding below.
+
+          You have three inputs:
+          1. The REVIEW JSON containing issues and quality items
+          2. The DIFF showing what changed
+          3. The FULL CONTENT of each changed file
+
+          For each issue and quality item, check:
+          1. Does the full file context already handle this? (error handlers, guards, constraints)
+          2. Is this a known-safe pattern? (framework protections, DB constraints, etc.)
+          3. Is the confidence justified or inflated?
+          4. Could this be a false positive based on incomplete context?
+
+          Return the SAME JSON structure but:
+          - REMOVE any findings you successfully disproved (explain why in a brief log line to stderr)
+          - LOWER confidence on findings you partially disproved
+          - KEEP findings you could not disprove
+          - Add a "validator_note" field on each kept finding explaining why it survived validation
+
+          Respond as JSON only (no markdown wrapping). Use the exact same schema as the input.
+          VALIDATOR_END
+
+          # ── Build validator payload ──────────────────────────────
+          jq -n \
+            --rawfile review /tmp/raw-review.json \
+            --rawfile diff /tmp/commit-diff.txt \
+            --rawfile file_contents /tmp/file-contents.txt \
+            --rawfile prompt /tmp/validator-prompt.txt \
+            --arg model "${{ inputs.review_model }}" \
+            '{
+              model: $model,
+              max_tokens: 4096,
+              messages: [{
+                role: "user",
+                content: ("## REVIEW TO VALIDATE\n" + $review + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT\n" + $file_contents + "\n\n" + $prompt)
+              }]
+            }' > /tmp/validator-payload.json
+
+          # ── Call Anthropic API ───────────────────────────────────
+          echo "::group::Validator API call"
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/validator-response.json \
+            https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d @/tmp/validator-payload.json)
+          echo "Validator HTTP status: $HTTP_CODE"
+          echo "::endgroup::"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            VALIDATED=$(cat /tmp/validator-response.json | jq -r '.content[0].text // empty')
+            if [ -n "$VALIDATED" ]; then
+              # Verify it's valid JSON before using it
+              if echo "$VALIDATED" | jq empty 2>/dev/null; then
+                echo "Validator returned valid JSON — using validated review"
+                echo "review<<EOF" >> $GITHUB_OUTPUT
+                echo "$VALIDATED" >> $GITHUB_OUTPUT
+                echo "EOF" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+          fi
+
+          # Fallback: use raw review if validator fails
+          echo "::warning::Validator failed or returned invalid JSON — using raw review"
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$RAW_REVIEW" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Send email digest
         uses: actions/github-script@v7
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          REVIEW_OUTPUT: ${{ steps.review.outputs.review }}
+          REVIEW_OUTPUT: ${{ steps.validate.outputs.review }}
           EMAIL_TO: ${{ inputs.email_to }}
           EMAIL_FROM: ${{ inputs.email_from }}
           CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}
@@ -426,6 +553,7 @@ jobs:
             const summary = review.summary || 'Review complete';
             const severity = review.severity || 'none';
             const allIssues = Array.isArray(review.issues) ? review.issues : [];
+            const qualityItems = Array.isArray(review.quality) ? review.quality : [];
             const verifiedSafe = Array.isArray(review.verified_safe) ? review.verified_safe : [];
 
             // ── Confidence-based filtering ──────────────────────────
@@ -489,6 +617,27 @@ jobs:
               safeHtml += '</ul>';
             }
 
+            // ── Code quality section ──────────────────────────────
+            let qualityHtml = '';
+            if (qualityItems.length > 0) {
+              const catLabels = { efficiency: 'Efficiency', clarity: 'Clarity', simplicity: 'Simplicity', dead_code: 'Dead Code' };
+              const catColors = { efficiency: '#8b5cf6', clarity: '#6366f1', simplicity: '#a855f7', dead_code: '#64748b' };
+              qualityHtml = '<h3 style="margin: 16px 0 8px; color: #8b5cf6;">Code Quality</h3>';
+              for (const item of qualityItems) {
+                const c = catColors[item.category] || '#8b5cf6';
+                const label = catLabels[item.category] || item.category;
+                qualityHtml += `
+                  <div style="border-left: 4px solid ${c}; padding: 10px 16px; margin: 6px 0; background: #faf5ff; border-radius: 0 6px 6px 0;">
+                    <div style="display: inline-block; background: ${c}; color: white; padding: 2px 8px; border-radius: 8px; font-size: 11px; margin-bottom: 4px;">
+                      ${esc(label)} &middot; ${esc(item.impact || 'low')}
+                    </div>
+                    <p style="margin: 4px 0; font-weight: 600; font-size: 14px;">${esc(item.title || 'Untitled')}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>File:</strong> ${esc(item.file || '?')}:${item.line || '?'}</p>
+                    <p style="margin: 4px 0; font-size: 13px; color: #475569;">${esc(item.suggestion || '')}</p>
+                  </div>`;
+              }
+            }
+
             // ── Raw fallback (if parse failed) ──────────────────────
             let rawHtml = '';
             if (review._raw) {
@@ -507,10 +656,11 @@ jobs:
                 <div style="border: 1px solid #e2e8f0; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
                   <p style="margin: 0 0 12px;"><strong>Message:</strong> ${commitMsg}</p>
                   <div style="display: inline-block; background: ${badgeColor}; color: white; padding: 4px 12px; border-radius: 12px; font-size: 14px; margin-bottom: 16px;">
-                    ${esc(severity.toUpperCase())} ${issuesFound ? `- ${actionable.length} Issue${actionable.length > 1 ? 's' : ''} Found` : '- All Clear'}
+                    ${esc(severity.toUpperCase())} ${issuesFound ? `- ${actionable.length} Issue${actionable.length > 1 ? 's' : ''} Found` : '- All Clear'}${qualityItems.length > 0 ? ` &middot; ${qualityItems.length} Quality Note${qualityItems.length > 1 ? 's' : ''}` : ''}
                   </div>
                   <p style="margin: 0 0 8px;"><strong>Summary:</strong> ${esc(summary)}</p>
                   ${issuesHtml}
+                  ${qualityHtml}
                   ${safeHtml}
                   ${rawHtml}
                   <p style="margin: 16px 0 0; font-size: 13px; color: #64748b;">
