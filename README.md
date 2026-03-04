@@ -65,7 +65,7 @@ jobs:
   review:
     uses: shifteddevlabs/workflows/.github/workflows/claude-review.yml@main
     with:
-      review_model: 'claude-sonnet-4-20250514'
+      review_model: 'claude-sonnet-4-6-20250610'
       email_to: 'team@example.com'
       confidence_threshold: 0.8
     secrets:
@@ -75,7 +75,7 @@ jobs:
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `review_model` | `claude-sonnet-4-20250514` | Anthropic model for push reviews |
+| `review_model` | `claude-sonnet-4-6-20250610` | Anthropic model for push reviews |
 | `email_to` | `shiftedmediagroup@gmail.com` | Email recipient for push digest |
 | `email_from` | `Code Review <codereview@shiftedmediagroup.com>` | Email sender |
 | `diff_limit` | `100000` | Max chars for diff (truncated beyond this) |
