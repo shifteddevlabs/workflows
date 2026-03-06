@@ -129,8 +129,8 @@ jobs:
           fi
 
           # ── Commit message (push vs PR) ────────────────────────────
-          # Use env vars (not ${{ }}) for user content — inline ${{ }}
-          # gets template-substituted before the shell runs, so newlines
+          # Use env vars for user content — inline expressions get
+          # template-substituted before the shell runs, so newlines
           # and special chars in commit messages break the script.
           {
             echo "commit_msg<<COMMIT_DELIM"
