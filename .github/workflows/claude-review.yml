@@ -4,17 +4,17 @@ on:
   workflow_call:
     inputs:
       review_model:
-        description: 'Anthropic model for push reviews'
+        description: 'Anthropic model for reviews'
         required: false
         type: string
         default: 'claude-sonnet-4-6'
       email_to:
-        description: 'Email recipient for push review digest'
+        description: 'Email recipient for review digest'
         required: false
         type: string
         default: 'shiftedmediagroup@gmail.com'
       email_from:
-        description: 'Email sender for push review digest'
+        description: 'Email sender for review digest'
         required: false
         type: string
         default: 'Code Review <codereview@shiftedmediagroup.com>'
@@ -41,118 +41,20 @@ on:
 
 jobs:
   # ============================================
-  # PR Review — uses claude-code-action (full agent)
-  # Posts inline comments directly on the PR
+  # Unified Review — robust 2-pass API review
+  # Runs on both push and pull_request events
+  # Posts PR comment (if PR) + sends email (always)
   # ============================================
-  pr-review:
-    if: github.event_name == 'pull_request'
+  review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-      issues: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Check for review context
-        id: context
-        run: |
-          if [ -f ".github/review-context.md" ]; then
-            echo "has_context=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_context=false" >> $GITHUB_OUTPUT
-          fi
-
-      - uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            ${{ steps.context.outputs.has_context == 'true' && format('## PROJECT CONTEXT\nRead the file .github/review-context.md first — it contains project-specific patterns, auth model, DB constraints, and known-safe designs you MUST understand before reviewing.\n\n') || '' }}
-
-            ## REVIEW METHODOLOGY
-
-            You are a code reviewer. Follow this exact process for every finding:
-
-            ### Step 1: Understand the change
-            Read the PR diff and understand what the author intended.
-
-            ### Step 2: Read full file context
-            For each changed file, read the FULL file (not just the diff hunk) to see surrounding code, imports, and error handling.
-
-            ### Step 3: Verify before reporting
-            Before flagging ANY issue, check whether:
-            - Existing code in the SAME FILE already mitigates it (error handlers, constraints, guards)
-            - A database constraint handles it (unique indexes, foreign keys, check constraints)
-            - The framework provides the protection (Next.js auto-escapes JSX, Supabase RLS, etc.)
-            - A shared utility handles it (check imports)
-
-            ### Step 4: Trace the failure path
-            For each potential issue, trace what ACTUALLY happens when it goes wrong:
-            - What error gets thrown? Is it caught?
-            - Does the function return early? Does the caller handle the error?
-            - Is there a try/catch? A database constraint? A type guard?
-
-            ### Step 5: Report only verified issues
-            Only flag issues where you can explain ALL THREE:
-            1. The EXACT file and line where the gap exists
-            2. HOW to trigger the problem (specific input, timing, or sequence)
-            3. WHY existing code does NOT prevent it
-
-            If you cannot fill in all three, do NOT report the finding.
-
-            ## SEVERITY DEFINITIONS
-            - **CRITICAL** = Exploitable security vulnerability or data exposure. Describe the exact exploit path.
-            - **HIGH** = Bug that WILL cause incorrect behavior in production. Describe the trigger scenario.
-            - **MEDIUM** = Missing error handling that could crash in an edge case, or race condition with real user impact.
-            - **LOW** = Code quality improvement, minor optimization, defensive coding suggestion.
-
-            ## KNOWN SAFE PATTERNS — DO NOT FLAG THESE
-            - DB `unique` constraints catching duplicates (error 23505) = intentional race condition handling
-            - UUID v4 tokens (122-bit entropy) = computationally infeasible to brute force
-            - `crypto.timingSafeEqual()` = prevents timing attacks on secret comparison
-            - Next.js JSX auto-escapes output = no XSS risk unless `dangerouslySetInnerHTML` is used
-            - `SUPABASE_SERVICE_ROLE_KEY` in Route Handlers / Server Components = server-side only, not exposed
-            - Null coalescing (`?? ""`) and optional chaining (`?.`) = intentional null safety
-            - Catching errors and returning success for idempotency = intentional, not hidden failures
-            - Strict equality (`=== true` / `=== false`) filtering non-boolean values = safe type guard
-
-            ## CODE QUALITY REVIEW
-            After the bug/security review, do a separate pass for code quality on the CHANGED code only:
-            - **Efficiency**: N+1 queries, unnecessary re-renders, redundant loops, expensive operations in hot paths
-            - **Clarity**: Confusing naming, deeply nested logic (3+ levels), magic numbers/strings, unclear function signatures
-            - **Simplicity**: Over-engineered patterns, premature abstractions, unnecessary indirection, code that could use a built-in
-            - **Dead code**: Unused exports, unreachable branches, commented-out code, unused variables/imports
-
-            Do NOT flag: import order, TypeScript strictness, formatting, semicolons, trailing commas.
-            Each quality observation needs a concrete suggestion, not just "this could be better."
-
-            ## OUTPUT FORMAT
-            - Use inline comments for specific code issues (cite the exact line)
-            - Post a summary comment with: overall severity, count of findings by tier, and what you verified was safe
-            - Include a "Code Quality" section with any efficiency, clarity, simplicity, or dead code observations
-            - Include a "Verified safe" section listing patterns you checked and confirmed are not issues
-            - If the code looks good, say "All clear" and briefly note what you verified
-
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read"
-
-  # ============================================
-  # Push Review — calls Anthropic API directly
-  # Sends structured email digest via Resend
-  # ============================================
-  push-review:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Generate diff and full file content
         id: diff
@@ -160,13 +62,18 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         run: |
-          # ── Multi-commit push support ──────────────────────────────
-          # Use the full push range instead of just HEAD~1
-          # Falls back to HEAD~1 for initial commits (before = 0000...)
-          if echo "$BEFORE_SHA" | grep -q "^0\{40\}$"; then
-            DIFF_RANGE="HEAD~1..HEAD"
+          # ── Diff range: PR vs push ──────────────────────────────────
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR: diff between base and head
+            git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1 2>/dev/null || true
+            DIFF_RANGE="${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
           else
-            DIFF_RANGE="${BEFORE_SHA}..${AFTER_SHA}"
+            # Push: use full push range, fall back to HEAD~1 for initial commits
+            if echo "$BEFORE_SHA" | grep -q "^0\{40\}$"; then
+              DIFF_RANGE="HEAD~1..HEAD"
+            else
+              DIFF_RANGE="${BEFORE_SHA}..${AFTER_SHA}"
+            fi
           fi
           echo "diff_range=$DIFF_RANGE" >> $GITHUB_OUTPUT
 
@@ -218,11 +125,22 @@ jobs:
             echo "has_context=false" >> $GITHUB_OUTPUT
           fi
 
+          # ── Commit message (push vs PR) ────────────────────────────
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
+            echo "PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
+            echo "${{ github.event.head_commit.message }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
       - name: Review with Claude API
         id: review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_MSG: ${{ steps.diff.outputs.commit_msg }}
           CHANGED_FILES: ${{ steps.diff.outputs.files }}
           HAS_CONTEXT: ${{ steps.diff.outputs.has_context }}
           DIFF_RANGE: ${{ steps.diff.outputs.diff_range }}
@@ -231,7 +149,7 @@ jobs:
           cat > /tmp/review-prompt.txt <<'PROMPT_END'
           ## REVIEW METHODOLOGY
 
-          You are reviewing a commit pushed to the main branch. You have up to three sources:
+          You are reviewing code changes. You have up to three sources:
           1. The DIFF showing what changed
           2. The FULL CONTENT of each changed file (with line numbers, so you can see surrounding code)
           3. Project-specific context (if provided) explaining auth patterns, DB design, and safe patterns
@@ -240,9 +158,17 @@ jobs:
           1. Read the project context (if provided) to understand codebase patterns and known-safe designs
           2. Read the diff to understand what changed and why
           3. Read the full file content to verify whether existing code already handles each concern
-          4. For each potential issue, trace the actual failure path — what happens when it goes wrong?
+          4. For each potential issue, trace the actual failure path — what ACTUALLY happens when it goes wrong?
+             - What error gets thrown? Is it caught?
+             - Does the function return early? Does the caller handle the error?
+             - Is there a try/catch? A database constraint? A type guard?
+             - Check imports — does a shared utility already handle this?
           5. Before reporting: try to DISPROVE the finding. Check for DB constraints, error handlers, type guards, framework protections
-          6. Only report issues where you can fill in ALL fields of the schema below
+          6. Only report issues where you can explain ALL THREE:
+             a. The EXACT file and line where the gap exists
+             b. HOW to trigger the problem (specific input, timing, or sequence)
+             c. WHY existing code does NOT prevent it (you checked guards, imports, DB constraints, framework protections)
+          If you cannot fill in all three, do NOT report the finding.
 
           ### Severity definitions:
           - CRITICAL = Exploitable security vulnerability or data exposure. You MUST describe the exploit path.
@@ -504,6 +430,115 @@ jobs:
           echo "$RAW_REVIEW" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_OUTPUT: ${{ steps.validate.outputs.review }}
+          CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}
+        with:
+          script: |
+            const reviewRaw = process.env.REVIEW_OUTPUT || '{}';
+            const threshold = parseFloat(process.env.CONFIDENCE_THRESHOLD) || 0.7;
+
+            // ── Parse review JSON ───────────────────────────────────
+            let review;
+            try {
+              const cleaned = reviewRaw
+                .replace(/```json\n?/g, '')
+                .replace(/```\n?/g, '')
+                .trim();
+              review = JSON.parse(cleaned);
+            } catch {
+              review = {
+                summary: 'Review complete (parse error — raw output below)',
+                severity: 'none',
+                issues: [],
+                quality: [],
+                verified_safe: [],
+                _raw: reviewRaw,
+              };
+            }
+
+            const summary = review.summary || 'Review complete';
+            const severity = review.severity || 'none';
+            const allIssues = Array.isArray(review.issues) ? review.issues : [];
+            const qualityItems = Array.isArray(review.quality) ? review.quality : [];
+            const verifiedSafe = Array.isArray(review.verified_safe) ? review.verified_safe : [];
+
+            const actionable = allIssues.filter(i => (i.confidence || 0) >= threshold);
+            const belowThreshold = allIssues.filter(i => (i.confidence || 0) < threshold);
+
+            // ── Build markdown comment ──────────────────────────────
+            const severityEmoji = {
+              none: '✅', low: '💡', medium: '⚠️', high: '🔶', critical: '🔴'
+            };
+            const emoji = severityEmoji[severity] || '❓';
+
+            let body = `## ${emoji} Code Review: **${severity.toUpperCase()}**\n\n`;
+            body += `**Summary:** ${summary}\n\n`;
+
+            // Issues
+            if (actionable.length > 0) {
+              body += `### 🐛 Issues Found (${actionable.length})\n\n`;
+              for (const issue of actionable) {
+                const conf = Math.round((issue.confidence || 0) * 100);
+                body += `#### ${(issue.severity || 'unknown').toUpperCase()} · ${conf}% confidence\n`;
+                body += `**${issue.title || 'Untitled'}**\n`;
+                body += `- **File:** \`${issue.file || '?'}:${issue.line || '?'}\`\n`;
+                body += `- **Exploit path:** ${issue.exploit_path || 'Not specified'}\n`;
+                body += `- **Why not mitigated:** ${issue.why_not_mitigated || 'Not specified'}\n`;
+                body += `- **Fix:** ${issue.fix || 'Not specified'}\n\n`;
+              }
+            }
+
+            // Below threshold
+            if (belowThreshold.length > 0) {
+              body += `<details>\n<summary>Investigated but not actionable (below ${Math.round(threshold * 100)}% confidence) — ${belowThreshold.length} item(s)</summary>\n\n`;
+              for (const issue of belowThreshold) {
+                const conf = Math.round((issue.confidence || 0) * 100);
+                body += `- **${issue.title || 'Untitled'}** (${conf}%) — \`${issue.file || '?'}:${issue.line || '?'}\`\n`;
+              }
+              body += `\n</details>\n\n`;
+            }
+
+            // Quality
+            if (qualityItems.length > 0) {
+              body += `### 🎨 Code Quality (${qualityItems.length})\n\n`;
+              for (const item of qualityItems) {
+                const cat = item.category || 'general';
+                const impact = item.impact || 'low';
+                body += `- **${cat}** · ${impact} — **${item.title || 'Untitled'}** (\`${item.file || '?'}:${item.line || '?'}\`)\n`;
+                body += `  ${item.suggestion || ''}\n\n`;
+              }
+            }
+
+            // Verified safe
+            if (verifiedSafe.length > 0) {
+              body += `<details>\n<summary>✅ Verified Safe (${verifiedSafe.length} patterns checked)</summary>\n\n`;
+              for (const item of verifiedSafe) {
+                body += `- ${item}\n`;
+              }
+              body += `\n</details>\n\n`;
+            }
+
+            // Raw fallback
+            if (review._raw) {
+              body += `<details>\n<summary>Raw Output (JSON parse failed)</summary>\n\n\`\`\`\n${review._raw}\n\`\`\`\n\n</details>\n\n`;
+            }
+
+            body += `---\n*Reviewed by Claude (2-pass with validator) · ${new Date().toISOString().split('T')[0]}*`;
+
+            // ── Post comment on PR ─────────────────────────────────
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: body
+            });
+
+            core.info('PR comment posted successfully');
+
       - name: Send email digest
         uses: actions/github-script@v7
         env:
@@ -512,6 +547,7 @@ jobs:
           EMAIL_TO: ${{ inputs.email_to }}
           EMAIL_FROM: ${{ inputs.email_from }}
           CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}
+          COMMIT_MSG_INPUT: ${{ steps.diff.outputs.commit_msg }}
         with:
           script: |
             const resendKey = process.env.RESEND_API_KEY;
@@ -562,11 +598,21 @@ jobs:
             const issuesFound = actionable.length > 0;
 
             // ── Build email content ─────────────────────────────────
-            const fullCommitMsg = context.payload.head_commit?.message || 'No message';
+            const isPR = context.eventName === 'pull_request';
+            const fullCommitMsg = process.env.COMMIT_MSG_INPUT || 'No message';
             const commitMsg = esc(fullCommitMsg.split('\n')[0]);
-            const commitUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`;
-            const shortSha = context.sha.substring(0, 7);
             const repo = `${context.repo.owner}/${context.repo.repo}`;
+
+            // Link: commit for push, PR for pull_request
+            let linkUrl, linkLabel;
+            if (isPR) {
+              const prNum = context.payload.pull_request.number;
+              linkUrl = `https://github.com/${repo}/pull/${prNum}`;
+              linkLabel = `PR #${prNum}`;
+            } else {
+              linkUrl = `https://github.com/${repo}/commit/${context.sha}`;
+              linkLabel = context.sha.substring(0, 7);
+            }
 
             const severityColors = {
               none: '#22c55e', low: '#3b82f6', medium: '#eab308',
@@ -651,7 +697,7 @@ jobs:
               <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 640px; margin: 0 auto;">
                 <div style="background: #0f172a; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
                   <h2 style="margin: 0;">Code Review: ${esc(repo)}</h2>
-                  <p style="margin: 8px 0 0; opacity: 0.8;">Commit <a href="${commitUrl}" style="color: #60a5fa;">${shortSha}</a></p>
+                  <p style="margin: 8px 0 0; opacity: 0.8;"><a href="${linkUrl}" style="color: #60a5fa;">${esc(linkLabel)}</a></p>
                 </div>
                 <div style="border: 1px solid #e2e8f0; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
                   <p style="margin: 0 0 12px;"><strong>Message:</strong> ${commitMsg}</p>
@@ -664,7 +710,7 @@ jobs:
                   ${safeHtml}
                   ${rawHtml}
                   <p style="margin: 16px 0 0; font-size: 13px; color: #64748b;">
-                    <a href="${commitUrl}" style="color: #3b82f6;">View commit on GitHub</a>
+                    <a href="${linkUrl}" style="color: #3b82f6;">View on GitHub</a>
                   </p>
                 </div>
               </div>`;
