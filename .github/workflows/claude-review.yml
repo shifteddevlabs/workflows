@@ -61,6 +61,9 @@ jobs:
         env:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # ── Diff range: PR vs push ──────────────────────────────────
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -126,15 +129,18 @@ jobs:
           fi
 
           # ── Commit message (push vs PR) ────────────────────────────
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
-            echo "PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "commit_msg<<EOF" >> $GITHUB_OUTPUT
-            echo "${{ github.event.head_commit.message }}" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
+          # Use env vars (not ${{ }}) for user content — inline ${{ }}
+          # gets template-substituted before the shell runs, so newlines
+          # and special chars in commit messages break the script.
+          {
+            echo "commit_msg<<COMMIT_DELIM"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              printf '%s\n' "PR #${PR_NUMBER}: ${PR_TITLE}"
+            else
+              printf '%s\n' "$COMMIT_MESSAGE"
+            fi
+            echo "COMMIT_DELIM"
+          } >> $GITHUB_OUTPUT
 
       - name: Review with Claude API
         id: review
