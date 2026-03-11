@@ -28,6 +28,11 @@ on:
         required: false
         type: number
         default: 80000
+      caller_content_limit:
+        description: 'Max chars for cross-file caller/importer context'
+        required: false
+        type: number
+        default: 40000
       confidence_threshold:
         description: 'Minimum confidence (0-1) to include a finding in the main report'
         required: false
@@ -119,6 +124,90 @@ jobs:
             TOTAL_SIZE=$NEW_TOTAL
           done <<< "$FILES"
 
+          # ── Cross-file awareness: find callers/importers ──────────
+          # For each changed file, find other files that import or
+          # reference it. This helps the reviewer catch ripple effects
+          # (e.g., a renamed export breaking a caller, or a changed
+          # function signature that callers depend on).
+          echo "" > /tmp/caller-contents.txt
+          CALLER_SIZE=0
+          CALLER_LIMIT=${{ inputs.caller_content_limit }}
+          CALLER_COUNT=0
+
+          # Build list of basenames to search for (without extension)
+          SEARCH_NAMES=""
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            [ ! -f "$file" ] && continue
+            # Only look for callers of source files
+            case "$file" in
+              *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.py|*.rs|*.go)
+                BASENAME=$(basename "$file" | sed 's/\.[^.]*$//')
+                # Skip index files (too generic to search for)
+                if [ "$BASENAME" != "index" ]; then
+                  SEARCH_NAMES="$SEARCH_NAMES $BASENAME"
+                fi
+                ;;
+            esac
+          done <<< "$FILES"
+
+          if [ -n "$SEARCH_NAMES" ]; then
+            # Find files that import/reference any changed file
+            CALLER_FILES=""
+            for NAME in $SEARCH_NAMES; do
+              # Search for import/require/from statements referencing this module
+              MATCHES=$(grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" \
+                -e "from.*['\"].*${NAME}['\"]" \
+                -e "import.*${NAME}" \
+                -e "require.*${NAME}" \
+                . 2>/dev/null | head -20 || true)
+              CALLER_FILES="$CALLER_FILES $MATCHES"
+            done
+
+            # Deduplicate and exclude files already in the diff
+            UNIQUE_CALLERS=$(echo "$CALLER_FILES" | tr ' ' '\n' | sort -u | while IFS= read -r caller; do
+              [ -z "$caller" ] && continue
+              # Normalize path (remove ./ prefix)
+              caller="${caller#./}"
+              # Skip if this file is already in the changed files
+              ALREADY_INCLUDED=false
+              while IFS= read -r changed; do
+                [ "$caller" = "$changed" ] && ALREADY_INCLUDED=true && break
+              done <<< "$FILES"
+              if [ "$ALREADY_INCLUDED" = "false" ]; then
+                echo "$caller"
+              fi
+            done)
+
+            while IFS= read -r caller; do
+              [ -z "$caller" ] && continue
+              [ ! -f "$caller" ] && continue
+
+              # Skip binary, lockfiles, generated files
+              case "$caller" in
+                *.lock|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.svg|package-lock.json|yarn.lock|pnpm-lock.yaml|*.map|node_modules/*|.next/*)
+                  continue
+                  ;;
+              esac
+
+              CFILE_SIZE=$(wc -c < "$caller" 2>/dev/null || echo 0)
+              NEW_CALLER_TOTAL=$((CALLER_SIZE + CFILE_SIZE))
+
+              if [ "$NEW_CALLER_TOTAL" -gt "$CALLER_LIMIT" ]; then
+                echo "--- TRUNCATED: Remaining caller files omitted (would exceed ${CALLER_LIMIT} char limit) ---" >> /tmp/caller-contents.txt
+                break
+              fi
+
+              echo "===== CALLER: $caller =====" >> /tmp/caller-contents.txt
+              cat -n "$caller" >> /tmp/caller-contents.txt
+              echo "" >> /tmp/caller-contents.txt
+              CALLER_SIZE=$NEW_CALLER_TOTAL
+              CALLER_COUNT=$((CALLER_COUNT + 1))
+            done <<< "$UNIQUE_CALLERS"
+          fi
+
+          echo "Cross-file callers found: $CALLER_COUNT"
+
           # ── Per-repo context ───────────────────────────────────────
           if [ -f ".github/review-context.md" ]; then
             cp .github/review-context.md /tmp/review-context.txt
@@ -155,10 +244,11 @@ jobs:
           cat > /tmp/review-prompt.txt <<'PROMPT_END'
           ## REVIEW METHODOLOGY
 
-          You are reviewing code changes. You have up to three sources:
+          You are reviewing code changes. You have up to four sources:
           1. The DIFF showing what changed
           2. The FULL CONTENT of each changed file (with line numbers, so you can see surrounding code)
-          3. Project-specific context (if provided) explaining auth patterns, DB design, and safe patterns
+          3. CALLER FILES — other files that import or reference the changed files (for cross-file awareness)
+          4. Project-specific context (if provided) explaining auth patterns, DB design, and safe patterns
 
           ### Your process — follow in order:
           1. Read the project context (if provided) to understand codebase patterns and known-safe designs
@@ -198,6 +288,20 @@ jobs:
           - Every finding MUST have: file, line, exploit_path, why_not_mitigated
           - If you cannot explain HOW to trigger the issue, do NOT include it
           - DO include a verified_safe array showing what you checked and confirmed is fine
+
+          ### Cross-file awareness
+          You may also receive CALLER FILES — these are files that import or reference the changed files.
+          Use them to check for ripple effects:
+          - If a function signature changed, do callers still pass the right arguments?
+          - If an export was renamed or removed, do importers still reference the correct name?
+          - If a return type or shape changed, do consumers handle the new shape?
+          - If a constant was moved to module scope or renamed, do references still resolve?
+          - If behavior changed (e.g., a function now returns early in new cases), do callers handle that?
+
+          Cross-file issues go in the main "issues" array with the appropriate severity.
+          Do NOT flag cross-file issues that are speculative — only flag them if you can see the actual
+          mismatch between the changed code and the caller code.
+          If no caller files are provided, skip this step.
 
           ### Code quality review
           After completing the bug/security review, do a SEPARATE pass for code quality:
@@ -246,14 +350,23 @@ jobs:
           If no issues found, set severity to "none", issues to [], quality to [], and fill verified_safe with what you checked.
           PROMPT_END
 
+          # ── Build caller context section ───────────────────────────
+          # Only include if we found caller files
+          CALLER_SECTION=""
+          if [ -s /tmp/caller-contents.txt ] && [ "$(wc -c < /tmp/caller-contents.txt)" -gt 1 ]; then
+            CALLER_SECTION="\n\n## CALLER FILES (import/reference the changed files)\n"
+          fi
+
           # ── Build API payload ──────────────────────────────────────
           if [ "$HAS_CONTEXT" = "true" ]; then
             jq -n \
               --arg msg "$COMMIT_MSG" \
               --arg files "$CHANGED_FILES" \
               --arg range "$DIFF_RANGE" \
+              --arg caller_header "$CALLER_SECTION" \
               --rawfile diff /tmp/commit-diff.txt \
               --rawfile file_contents /tmp/file-contents.txt \
+              --rawfile callers /tmp/caller-contents.txt \
               --rawfile context /tmp/review-context.txt \
               --rawfile prompt /tmp/review-prompt.txt \
               --arg model "${{ inputs.review_model }}" \
@@ -262,7 +375,7 @@ jobs:
                 max_tokens: 8192,
                 messages: [{
                   role: "user",
-                  content: ("## PROJECT CONTEXT\n" + $context + "\n\n## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
+                  content: ("## PROJECT CONTEXT\n" + $context + "\n\n## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + (if ($caller_header | length) > 0 then $caller_header + $callers else "" end) + "\n\n" + $prompt)
                 }]
               }' > /tmp/api-payload.json
           else
@@ -270,8 +383,10 @@ jobs:
               --arg msg "$COMMIT_MSG" \
               --arg files "$CHANGED_FILES" \
               --arg range "$DIFF_RANGE" \
+              --arg caller_header "$CALLER_SECTION" \
               --rawfile diff /tmp/commit-diff.txt \
               --rawfile file_contents /tmp/file-contents.txt \
+              --rawfile callers /tmp/caller-contents.txt \
               --rawfile prompt /tmp/review-prompt.txt \
               --arg model "${{ inputs.review_model }}" \
               '{
@@ -279,7 +394,7 @@ jobs:
                 max_tokens: 8192,
                 messages: [{
                   role: "user",
-                  content: ("## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + "\n\n" + $prompt)
+                  content: ("## COMMIT\nMessage: " + $msg + "\nRange: " + $range + "\n\nFiles changed:\n" + $files + "\n\n## DIFF\n" + $diff + "\n\n## FULL FILE CONTENT (with line numbers)\n" + $file_contents + (if ($caller_header | length) > 0 then $caller_header + $callers else "" end) + "\n\n" + $prompt)
                 }]
               }' > /tmp/api-payload.json
           fi

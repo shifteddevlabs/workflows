@@ -84,6 +84,7 @@ jobs:
 | `email_from` | `Code Review <codereview@shiftedmediagroup.com>` | Email sender |
 | `diff_limit` | `100000` | Max chars for diff (truncated beyond this) |
 | `file_content_limit` | `80000` | Max chars for full file content |
+| `caller_content_limit` | `40000` | Max chars for cross-file caller/importer context |
 | `confidence_threshold` | `0.7` | Min confidence (0-1) for main report. Below-threshold findings appear in a separate "not actionable" section |
 
 ---
@@ -158,6 +159,27 @@ Quality items have `low` or `medium` impact (never high/critical — those are b
 
 ---
 
+## Cross-File Awareness
+
+*Added 2026-03-10.*
+
+The reviewer automatically discovers files that import or reference the changed files and includes them as context. This catches ripple effects that a diff-only review would miss:
+
+- **Renamed/removed exports** — callers still referencing the old name
+- **Changed function signatures** — callers passing wrong arguments
+- **Changed return types** — consumers expecting the old shape
+- **Behavioral changes** — callers depending on old behavior (e.g., a function that now returns early)
+
+**How it works:**
+1. For each changed source file, `grep -rl` searches the repo for files that import or reference it
+2. Those "caller" files are collected (up to `caller_content_limit` chars, default 40KB)
+3. The caller content is included in the API payload alongside the diff and changed file content
+4. The review prompt instructs the reviewer to check for mismatches between changed code and callers
+
+**Cost impact:** Minimal — caller content is capped at 40KB by default and only source files (`.ts`, `.tsx`, `.js`, `.jsx`, etc.) are searched. The reviewer is instructed to only flag concrete mismatches, not speculative issues.
+
+---
+
 ## Validator Pass
 
 Push reviews include a second API call that acts as a skeptical reviewer. This step:
@@ -189,10 +211,19 @@ This adds ~$0.03-0.08 per review (only when findings exist) and significantly re
 ## How It Reduces False Positives
 
 1. **Full file context** — push reviews see entire changed files (with line numbers), not just diffs
-2. **Multi-commit range** — reviews all commits in a push, not just the last one
-3. **Verification-first methodology** — reviewer must try to disprove each finding before reporting
-4. **Known safe patterns** — common false-positive triggers (DB constraints, UUID entropy, JSX escaping) are pre-documented
-5. **Structured evidence** — every finding needs file, line, exploit path, and confidence score
-6. **Confidence filtering** — low-confidence findings are separated from actionable ones
-7. **Per-repo context** — project-specific knowledge prevents architectural misunderstandings
-8. **Validator pass** — a second API call independently tries to disprove each finding before the email is sent
+2. **Cross-file awareness** — callers/importers of changed files are included so the reviewer can catch ripple effects
+3. **Multi-commit range** — reviews all commits in a push, not just the last one
+4. **Verification-first methodology** — reviewer must try to disprove each finding before reporting
+5. **Known safe patterns** — common false-positive triggers (DB constraints, UUID entropy, JSX escaping) are pre-documented
+6. **Structured evidence** — every finding needs file, line, exploit path, and confidence score
+7. **Confidence filtering** — low-confidence findings are separated from actionable ones
+8. **Per-repo context** — project-specific knowledge prevents architectural misunderstandings
+9. **Validator pass** — a second API call independently tries to disprove each finding before the email is sent
+
+---
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-03-10 | Added cross-file awareness — reviewer now sees callers/importers of changed files to catch ripple effects |
