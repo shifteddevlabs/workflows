@@ -1,0 +1,132 @@
+X-Antivirus: avast (VPS 26030400)
+X-Antivirus-Status: Clean
+Delivered-To: shiftedmediagroup@gmail.com
+Received: by 2002:a05:6504:1909:b0:2dc:4301:a48b with SMTP id v9csp3117494ltt;
+        Wed, 4 Mar 2026 00:04:44 -0800 (PST)
+X-Received: by 2002:a05:620a:1a84:b0:893:2ba8:eec8 with SMTP id af79cd13be357-8cd5afcdc05mr140794285a.79.1772611484216;
+        Wed, 04 Mar 2026 00:04:44 -0800 (PST)
+ARC-Seal: i=1; a=rsa-sha256; t=1772611484; cv=none;
+        d=google.com; s=arc-20240605;
+        b=I2vAPVxRghzuBCH/CAawamFZiOVrgHprjNzatUK9WIsG+e+er6NS0SIdRBO8Go6lUl
+         pEeiDEp5tCnE8z5SdSWdI9vICLR30gF/U5XdrsOaBlOFb+NFTpeF+ZxPW3+PRIa8mGoB
+         cI4HCNDoLGf0mK9P0OaTihF3HqFoI2b9ScdlgXyCS/fRlocb4CIEOFLKSa+Q5ZOybz0+
+         N/WIktOi2pED8a2Od+T0l6d+5bH7Ev1lGMP3+GXpjnNPNO9FYgqhkJPj7UxBZ0TjcOYM
+         pqkaxH++Mikn0sn0764dz2I3DH3uNXpZ4yayB1NJG9MpT4z8T+7Nb3kvbciWKW2SS4vC
+         rXTw==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;
+        h=feedback-id:mime-version:date:message-id:subject:to:from
+         :dkim-signature:dkim-signature;
+        bh=5VUaWIvOZC9cqVlYg0/VSHBbG4KiodCnUMwc6QdRhLM=;
+        fh=Etitqf3MeqeOgFMIJvNxqzk4S5HxMypHqAWxHXXPDfM=;
+        b=NjmpHo1clMUXovY3UxicUa6JPk3PciV8mziGZuN5kTKNcf2sMKcU6RSHRclpUI8R59
+         6qTVMo2o3TN/8RYQ8og3KSFwn+23f5oGpY2aPml+C0rgEzZxkdE064vKztIS2druU63E
+         Mq4NlTuFIOtSizhYrqatE+3+y64nvyXJjtHc5qWX1KcB/i+rtOUbn6i0GfCXTq8BYBef
+         syDG1BnpGV8HdQ5y9O6Bx4uh7zFJMzqHoRampNwv7k8wHE28QawlzCrNUBMhyregVN1s
+         rsblpAslUruSh0xY2xUa5SwJ4ZqjoHEIMsIT6uWD7FZM3n8UI4zc0YG7y5W6L+HJREIZ
+         0n5g==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@shiftedmediagroup.com header.s=resend header.b=tVFtgCZL;
+       dkim=pass header.i=@amazonses.com header.s=6gbrjpgwjskckoa6a5zn6fwqkn67xbtw header.b=IiUE6XrU;
+       spf=pass (google.com: domain of 0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com designates 54.240.14.55 as permitted sender) smtp.mailfrom=0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=shiftedmediagroup.com
+Return-Path: <0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com>
+Received: from a14-55.smtp-out.amazonses.com (a14-55.smtp-out.amazonses.com. [54.240.14.55])
+        by mx.google.com with ESMTPS id 6a1803df08f44-899e7457167si116654356d6.174.2026.03.04.00.04.44
+        for <shiftedmediagroup@gmail.com>
+        (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
+        Wed, 04 Mar 2026 00:04:44 -0800 (PST)
+Received-SPF: pass (google.com: domain of 0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com designates 54.240.14.55 as permitted sender) client-ip=54.240.14.55;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@shiftedmediagroup.com header.s=resend header.b=tVFtgCZL;
+       dkim=pass header.i=@amazonses.com header.s=6gbrjpgwjskckoa6a5zn6fwqkn67xbtw header.b=IiUE6XrU;
+       spf=pass (google.com: domain of 0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com designates 54.240.14.55 as permitted sender) smtp.mailfrom=0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@send.shiftedmediagroup.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=shiftedmediagroup.com
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=resend;
+	d=shiftedmediagroup.com; t=1772611483;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type;
+	bh=YHoqQeNMh/c3V2bUFwQZNJw3a+OiA9y7CSAyUPGjl3E=;
+	b=tVFtgCZLieeZOG7FJIMqvrYeqyPeB4nwtXu/OVPsayqYuUUtxSv7cMou8Hotu71Q
+	Gbts2/hAEM5R8Z0gAqKa5Ee3BOwJAIAeH4/WRj1iVjLBdUYWq6d1UmObnWoZHU2rS6c
+	HEL9x0wsBkElFCo4k4hk4kQkzGNHcWJCNB+AOjgY=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=6gbrjpgwjskckoa6a5zn6fwqkn67xbtw; d=amazonses.com; t=1772611483;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type:Feedback-ID;
+	bh=YHoqQeNMh/c3V2bUFwQZNJw3a+OiA9y7CSAyUPGjl3E=;
+	b=IiUE6XrUVjQaI+QvcR/VJZWJTGcXNGmTABOYKnO22eLRvv8GIs+2/WuGFbeVRW/P
+	tkoIj2PXmPV6ychlJfSb3XY06X5lHrq6fKTEww9CT6mgTPJFZZqDH3AUTkmyboImqPU
+	Er5QnPG43AX1oXev+m0ef0LEL6mvI3aRBS3rpYS0=
+From: Code Review <codereview@shiftedmediagroup.com>
+To: shiftedmediagroup@gmail.com
+Subject: [NONE] Code Review: chore: trigger Sonnet 4.6 review test
+Message-ID: <0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-000000@email.amazonses.com>
+Date: Wed, 4 Mar 2026 08:04:43 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="--_NmP-89a328731667a7a7-Part_1"
+Feedback-ID: :1.us-east-1.Gf1etw/qX/bHkz1HZCLv3xmkqJ6PUxeSw+u+ye8pdHoo7gIYX2Jk0vULzwdf1nysINuzydY3A9T1h61AmgXut5bPMMuPfOazw8tWXlXzW35GCJV0GMp23pFA+drg5IUaZzsbAYL6ROMHvvg/wJOZDuth/7T4AlJ8B8w/avqLS2Y=:1.us-east-1.bUdgMqWxfG2SVsrQjgiKGviqCgupN9bd/NLnQooLs3w=:AmazonSES
+X-SES-Outgoing: 2026.03.04-54.240.14.55
+
+----_NmP-89a328731667a7a7-Part_1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+CODE REVIEW: SHIFTEDDEVLABS/SMG-EP
+
+Commit 76f019d https://github.=
+com/shifteddevlabs/smg-ep/commit/76f019d958cd128cca9483f10c5ca70c60dd445d
+
+Message: chore: trigger Sonnet 4.6 review test
+
+NONE - All Clear
+
+Summary: Review unavailable - API error
+
+View commit on GitHub =
+https://github.com/shifteddevlabs/smg-ep/commit/76f019d958cd128cca9483f10c5=
+ca70c60dd445d
+----_NmP-89a328731667a7a7-Part_1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+
+  <div style=3D"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',=
+ sans-serif; max-width: 640px; margin: 0 auto;">
+    <div style=3D"background: #0f172a; color: white; padding: 20px; border-=
+radius: 8px 8px 0 0;">
+      <h2 style=3D"margin: 0;">Code Review: shifteddevlabs/smg-ep</h2>
+      <p style=3D"margin: 8px 0 0; opacity: 0.8;">Commit <a href=3D"https:/=
+/a095f6654440fbc78d36298c57edba9d.us-east-1.resend-clicks-a.com/CL0/https:%=
+2F%2Fgithub.com%2Fshifteddevlabs%2Fsmg-ep%2Fcommit%2F76f019d958cd128cca9483=
+f10c5ca70c60dd445d/1/0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-9118038f1b33-=
+000000/qJSuntOm6JYWG4d5kQrofSY5nIWbSg4JfiLwPfmWcJQ=3D447" style=3D"color: #=
+60a5fa;">76f019d</a></p>
+    </div>
+    <div style=3D"border: 1px solid #e2e8f0; border-top: none; padding: 20p=
+x; border-radius: 0 0 8px 8px;">
+      <p style=3D"margin: 0 0 12px;"><strong>Message:</strong> chore: trigg=
+er Sonnet 4.6 review test</p>
+      <div style=3D"display: inline-block; background: #22c55e; color: whit=
+e; padding: 4px 12px; border-radius: 12px; font-size: 14px; margin-bottom: =
+16px;">
+        NONE - All Clear
+      </div>
+      <p style=3D"margin: 0 0 8px;"><strong>Summary:</strong> Review unavai=
+lable - API error</p>
+     =20
+     =20
+     =20
+      <p style=3D"margin: 16px 0 0; font-size: 13px; color: #64748b;">
+        <a href=3D"https://a095f6654440fbc78d36298c57edba9d.us-east-1.resen=
+d-clicks-a.com/CL0/https:%2F%2Fgithub.com%2Fshifteddevlabs%2Fsmg-ep%2Fcommi=
+t%2F76f019d958cd128cca9483f10c5ca70c60dd445d/2/0100019cb7e0b81c-fed4fe0f-87=
+88-4a73-9e9e-9118038f1b33-000000/cBHEj12c5iZEGpojHE3rZ3fe4z8nMl3RPxGa51kFyr=
+I=3D447" style=3D"color: #3b82f6;">View commit on GitHub</a>
+      </p>
+    </div>
+  </div><img alt=3D"" src=3D"http://a095f6654440fbc78d36298c57edba9d.us-eas=
+t-1.resend-clicks-a.com/CI0/0100019cb7e0b81c-fed4fe0f-8788-4a73-9e9e-911803=
+8f1b33-000000/56afUDpmHbwvKVyVps9H1n9cPaf8ytcc7dGReciZGFc=3D447" style=3D"d=
+isplay: none; width: 1px; height: 1px;">
+
+----_NmP-89a328731667a7a7-Part_1--
