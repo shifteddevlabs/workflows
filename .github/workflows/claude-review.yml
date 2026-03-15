@@ -209,13 +209,26 @@ jobs:
           echo "Cross-file callers found: $CALLER_COUNT"
 
           # ── Per-repo context ───────────────────────────────────────
+          HAS_CONTEXT=false
+          echo "" > /tmp/review-context.txt
+
           if [ -f ".github/review-context.md" ]; then
-            cp .github/review-context.md /tmp/review-context.txt
-            echo "has_context=true" >> $GITHUB_OUTPUT
-          else
-            echo "" > /tmp/review-context.txt
-            echo "has_context=false" >> $GITHUB_OUTPUT
+            cat .github/review-context.md > /tmp/review-context.txt
+            HAS_CONTEXT=true
           fi
+
+          # ── Cumulative safe patterns (optional) ─────────────────────
+          if [ -f ".github/review-safe-patterns.md" ]; then
+            {
+              echo ""
+              echo "### Cumulative safe patterns — these have been verified in prior reviews, do not re-flag:"
+              echo ""
+              cat .github/review-safe-patterns.md
+            } >> /tmp/review-context.txt
+            HAS_CONTEXT=true
+          fi
+
+          echo "has_context=$HAS_CONTEXT" >> $GITHUB_OUTPUT
 
           # ── Commit message (push vs PR) ────────────────────────────
           # Use env vars for user content — inline expressions get
@@ -312,6 +325,34 @@ jobs:
           - If the fix is correct and introduces no new issues, return severity "none" with empty issues and quality arrays
           - You have no memory of what the prior review said, so trust that the developer followed it
 
+          ### Examples of good vs bad findings
+
+          GOOD finding (include):
+          {
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "src/components/editor.tsx",
+            "line": 70,
+            "title": "setEditing(null) called even when save fails — user loses their edit",
+            "exploit_path": "User edits a field → server returns error → setEditing(null) fires → input closes → user's typed text is gone",
+            "why_not_mitigated": "No conditional check on result.error before calling setEditing(null) on line 70",
+            "fix": "Move setEditing(null) inside the success branch: `if (result.error) { setSaving(false); return; }`"
+          }
+
+          BAD finding (do NOT include):
+          {
+            "title": "Consider extracting this into a helper function",
+            "exploit_path": "N/A — this is a style preference, not a bug"
+          }
+          Why bad: No specific trigger, no consequence, no bug. Pure style opinion.
+
+          BAD finding (do NOT include):
+          {
+            "title": "This comment could be more descriptive",
+            "exploit_path": "N/A — comments don't affect runtime behavior"
+          }
+          Why bad: Comments are not bugs. Only flag comments that are actively misleading (state the opposite of what the code does).
+
           ### Code quality review
           After completing the bug/security review, do a SEPARATE pass for code quality:
           - **Efficiency**: N+1 queries, unnecessary re-renders, redundant loops, expensive operations in hot paths, missing memoization
@@ -349,7 +390,9 @@ jobs:
                 "file": "path/to/file.ts",
                 "line": 42,
                 "title": "Short description",
-                "suggestion": "What to improve and why",
+                "before": "const x = items.filter(i => i.active).length;  // called in render",
+                "after": "const x = useMemo(() => items.filter(i => i.active).length, [items]);",
+                "why": "One sentence explaining why the change matters",
                 "impact": "low|medium"
               }
             ],
@@ -640,8 +683,11 @@ jobs:
               for (const item of qualityItems) {
                 const cat = item.category || 'general';
                 const impact = item.impact || 'low';
-                body += `- **${cat}** · ${impact} — **${item.title || 'Untitled'}** (\`${item.file || '?'}:${item.line || '?'}\`)\n`;
-                body += `  ${item.suggestion || ''}\n\n`;
+                body += `#### ${cat} · ${impact}\n`;
+                body += `**${item.title || 'Untitled'}** (\`${item.file || '?'}:${item.line || '?'}\`)\n\n`;
+                body += `Why: ${item.why || ''}\n\n`;
+                body += `\`\`\`before\n${item.before || ''}\n\`\`\`\n\n`;
+                body += `\`\`\`after\n${item.after || ''}\n\`\`\`\n\n`;
               }
             }
 
@@ -806,12 +852,11 @@ jobs:
                 const label = catLabels[item.category] || item.category;
                 qualityHtml += `
                   <div style="border-left: 4px solid ${c}; padding: 10px 16px; margin: 6px 0; background: #faf5ff; border-radius: 0 6px 6px 0;">
-                    <div style="display: inline-block; background: ${c}; color: white; padding: 2px 8px; border-radius: 8px; font-size: 11px; margin-bottom: 4px;">
-                      ${esc(label)} &middot; ${esc(item.impact || 'low')}
-                    </div>
-                    <p style="margin: 4px 0; font-weight: 600; font-size: 14px;">${esc(item.title || 'Untitled')}</p>
-                    <p style="margin: 4px 0; font-size: 13px; color: #475569;"><strong>File:</strong> ${esc(item.file || '?')}:${item.line || '?'}</p>
-                    <p style="margin: 4px 0; font-size: 13px; color: #475569;">${esc(item.suggestion || '')}</p>
+                    <strong>${esc(label)} &middot; ${esc(item.impact || 'low')}</strong><br/>
+                    <strong>${esc(item.title || 'Untitled')}</strong> (${esc(item.file || '?')}:${item.line || '?'})<br/>
+                    <em>Why:</em> ${esc(item.why || '')}<br/>
+                    <code style="display: block; background: #fef2f2; padding: 6px 10px; margin: 4px 0; border-radius: 4px; font-size: 12px; white-space: pre-wrap;">Before: ${esc(item.before || '')}</code>
+                    <code style="display: block; background: #f0fdf4; padding: 6px 10px; margin: 4px 0; border-radius: 4px; font-size: 12px; white-space: pre-wrap;">After: ${esc(item.after || '')}</code>
                   </div>`;
               }
             }
