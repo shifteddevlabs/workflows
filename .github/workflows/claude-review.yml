@@ -303,6 +303,15 @@ jobs:
           mismatch between the changed code and the caller code.
           If no caller files are provided, skip this step.
 
+          ### Fix commit awareness
+          If the commit message contains "address code review", "fix: review", "code review fixes",
+          or similar phrases indicating this commit was made IN RESPONSE to a prior code review:
+          - Focus on whether the fix introduced a NEW bug or security issue
+          - Do NOT flag the style/approach of the fix itself — it was done per prior review guidance
+          - Do NOT suggest alternative approaches to changes that are clearly addressing review feedback
+          - If the fix is correct and introduces no new issues, return severity "none" with empty issues and quality arrays
+          - You have no memory of what the prior review said, so trust that the developer followed it
+
           ### Code quality review
           After completing the bug/security review, do a SEPARATE pass for code quality:
           - **Efficiency**: N+1 queries, unnecessary re-renders, redundant loops, expensive operations in hot paths, missing memoization
@@ -313,8 +322,10 @@ jobs:
           Quality rules:
           - Only flag quality items in the CHANGED code (the diff), not pre-existing code
           - Do NOT flag: import order, TypeScript strictness, formatting, semicolons, trailing commas
-          - Each quality item needs a concrete suggestion, not just "this could be better"
+          - Each quality item needs a **concrete code change** — show the exact before/after, not just "consider doing X" or "this could be better"
+          - If you cannot write the exact replacement code, the suggestion is too vague to include
           - Impact is "low" (nice-to-have) or "medium" (noticeably improves the code)
+          - If the overall severity is "none" (no bugs or security issues), only include quality items with impact "medium" or higher — skip low-impact style preferences on otherwise clean commits
 
           ### Response format — respond as JSON only (no markdown wrapping):
           {
